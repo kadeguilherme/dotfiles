@@ -12,11 +12,10 @@ Baixando JetBrains
 ```bash
 $ wget -P /tmp/JetBrainsMono.zip https://download.jetbrains.com/fonts/JetBrainsMono-2.304.zip 
 ```
-Unpack fonts para */usr/share/fonts*
+Unpack fonts para *~/.local/share/fonts*
 
 ```bash
-$ sudo unzip /tmp/JetBrainsMono.zip -d /usr/share/fonts
-
+$ sudo unzip /tmp/JetBrainsMono.zip -d ~/.local/share/fonts
 $ fc-cache -f -v
 ```
 
