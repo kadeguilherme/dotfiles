@@ -1,6 +1,6 @@
 -------------------------------------------------
--- name : vim-tmux-navigator
--- url  : https://github.com/christoomey/vim-tmux-navigator
+-- name : neo-tree.nvim
+-- url  : https://github.com/nvim-neo-tree/neo-tree.nvim
 ----------------------------------------------
 
 return {
