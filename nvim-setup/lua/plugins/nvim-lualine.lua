@@ -1,3 +1,4 @@
+
 -------------------------------------------------
 -- name : nvim-lualine/lualine.nvim
 -- url  : https://github.com/nvim-lualine/lualine.nvim
@@ -18,7 +19,7 @@ return {
             },
             sections = {
                 lualine_a = {'mode'},
-                lualine_b = {'branch','diagnostics'},
+                lualine_b = {'branch', 'diff', 'diagnostics'},
                 lualine_c = {'filename'},
                 lualine_x = {'filetype'},
                 lualine_y = {'progress'},
@@ -31,7 +32,7 @@ return {
                 lualine_x = {},
                 lualine_y = {},
                 lualine_z = {}
-             },
+              },
         })
     end
 }
