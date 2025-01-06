@@ -1,35 +1,16 @@
 -------------------------------------------------
--- name : nvim-web-devicons
--- url  : https://github.com/nvim-tree/nvim-web-devicons
+-- name : nvim-treesitter
+-- url  : https://github.com/nvim-treesitter/nvim-treesitter
 -------------------------------------------------
-local config = function()
-	require("nvim-treesitter.configs").setup({
-		indent = {
-			enable = true,
-		},
-		autotag = {
-			enable = true,
-		},
-		ensure_installed = {
-			"markdown",
-			"json",
-			"yaml",
-			"html",
-			"lua",
-			"dockerfile",
-			"gitignore",
-			"python",
-		},
-		auto_install = true,
-		highlight = {
-			enable = true,
-			additional_vim_regex_highlighting = true,
-		},
-	})
-end
-
 return {
-	"nvim-treesitter/nvim-treesitter",
-  	lazy = false,
-  	config = config
+    "nvim-treesitter/nvim-treesitter",
+    build = ":TSUpdate",
+    config = function ()
+        local config =  require("nvim-treesitter.configs")
+        config.setup({
+          ensure_installed = { "bash", "c", "dockerfile", "gitignore", "go", "lua","hcl", "helm", "vim", "vimdoc", "jq", "query", "json", "terraform", "html", "markdown", "markdown_inline" },
+          highlight = { enable = true },
+          indent = { enable = true },
+        })
+    end
 }
