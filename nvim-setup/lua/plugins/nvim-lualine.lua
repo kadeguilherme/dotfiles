@@ -1,4 +1,3 @@
-
 -------------------------------------------------
 -- name : nvim-lualine/lualine.nvim
 -- url  : https://github.com/nvim-lualine/lualine.nvim

@@ -1,6 +1,6 @@
 -------------------------------------------------
 -- name : vim-tmux-navigator
--- url  : https://github.com/christoomey/vim-tmux-navigator
+-- url  : https://github.com/nvim-telescope/telescope.nvim
 -----------------------------------------------
 return {
   {
