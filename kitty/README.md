@@ -6,7 +6,7 @@ Este repositorio contem as configurações do meu terminal [kitty](https://sw.ko
 
 ---
 
-##   Estrutura
+# 📁 Estrutura
 
 - `kitty.conf`: Arquivo de configuração do kitty.
 - `kitty-icon`: Diretorio onde tem imagem do icone do kitty.
