@@ -13,7 +13,7 @@ Este repositorio contem as configurações do meu terminal [kitty](https://sw.ko
 
 ---
 
-##   Configurando o kitty
+## 🛠️Configurando o kitty
 
 ### 1. Instale o kitty
 Siga as intruções da documentação para instalar o kitty: [instalação kitty](https://sw.kovidgoyal.net/kitty/binary/)
