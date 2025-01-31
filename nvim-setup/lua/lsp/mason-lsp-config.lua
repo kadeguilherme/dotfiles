@@ -13,6 +13,7 @@ return {
           "bashls",                          -- bash
           "clangd",                          -- C
           "docker_compose_language_service", -- docker
+          "groovyls",                        -- groovyls
           "helm_ls",                         -- helm
           "jqls",                            -- jq
           "jsonls",                          --json
