@@ -43,7 +43,6 @@ cd kitty
 cp * ~/.config/kitty
 ```
 
----
 ### 5. 🖥️ Tab Bar Configuration (tab_bar.py)
 O script tab_bar.py é responsável pela personalização da barra de abas no terminal Kitty. Ele permite modificar a aparência das abas, incluindo cores, estilo de fontes e comportamento.
 
