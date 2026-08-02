@@ -320,9 +320,9 @@ function M.yank_permalink()
   vim.notify(url, vim.log.levels.INFO, { title = "permalink copiado" })
 end
 
----Abre o lazygit na raiz do repositório do arquivo atual.
----O `:LazyGit` do plugin não passa `-p`, então ele herda o cwd do Neovim — que
----muitas vezes não é o repositório do arquivo aberto (ou não é repo nenhum).
+--- NÃO usa `:LazyGit`: sem path, o binário herda o cwd do Neovim, que
+--- nem sempre é o repo do arquivo aberto. Aqui a raiz sobe até o `.git`
+--- e é passada como diretório, ativando o `-p`.
 function M.lazygit()
   local root = M.buf_root()
   if not root then
