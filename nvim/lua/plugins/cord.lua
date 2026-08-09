@@ -21,11 +21,19 @@ return {
 
     text = {
       viewing = function()
-        return "Coding in Neovim"
+        return "💻 Coding in Neovim"
       end,
 
       workspace = function()
-        return "Neovim"
+        return "💻 Coding in Neovim"
+      end,
+
+      editing = function()
+        return ""
+      end,
+
+      file = function()
+        return ""
       end,
     },
 
