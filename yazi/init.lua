@@ -6,7 +6,8 @@ function Linemode:size_and_mtime()
 	elseif os.date("%Y", time) == os.date("%Y") then
 		time = os.date("%d/%m %H:%M", time)
 	else
-		time = os.date("%d/%m/%Y", time)
+		-- Espaço à esquerda iguala a largura de "%d/%m %H:%M" (11), mantendo a coluna alinhada
+		time = os.date(" %d/%m/%Y", time)
 	end
 
 	local size = self._file:size()
