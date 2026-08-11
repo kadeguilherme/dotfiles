@@ -10,30 +10,6 @@ return {
   event = { "BufReadPre", "BufNewFile" },
 
   config = function()
-    require("nvim-treesitter").install({
-      "lua",
-      "vim",
-      "vimdoc",
-      "query",
-      "markdown",
-      "markdown_inline",
-      "bash",
-      "json",
-      "yaml",
-      "toml",
-      "go",
-      "gomod",
-      "gosum",
-      "gowork",
-      "hcl",
-      "terraform",
-      "python",
-      -- Go Template: `helm` é o dialeto que config/filetypes.lua atribui aos
-      -- templates de chart; `gotmpl` cobre o resto (.tmpl, .gotmpl).
-      "helm",
-      "gotmpl",
-    })
-
     ---Liga o highlight do Tree-sitter quando existe parser para o buffer.
     ---@param bufnr integer
     local function iniciar(bufnr)
@@ -54,6 +30,40 @@ return {
       if vim.api.nvim_buf_is_loaded(bufnr) then
         iniciar(bufnr)
       end
+    end
+
+    -- Depois do highlight: `install` só existe no branch `main`, e um clone
+    -- ainda em `master` derrubava o config inteiro, deixando tudo sem highlight.
+    local ok, err = pcall(function()
+      require("nvim-treesitter").install({
+        "lua",
+        "vim",
+        "vimdoc",
+        "query",
+        "markdown",
+        "markdown_inline",
+        "bash",
+        "json",
+        "yaml",
+        "toml",
+        "go",
+        "gomod",
+        "gosum",
+        "gowork",
+        "hcl",
+        "terraform",
+        "python",
+        -- Go Template: `helm` é o dialeto que config/filetypes.lua atribui aos
+        -- templates de chart; `gotmpl` cobre o resto (.tmpl, .gotmpl).
+        "helm",
+        "gotmpl",
+      })
+    end)
+    if not ok then
+      vim.notify(
+        "nvim-treesitter: install falhou (rode :Lazy update nvim-treesitter)\n" .. tostring(err),
+        vim.log.levels.WARN
+      )
     end
   end,
 }

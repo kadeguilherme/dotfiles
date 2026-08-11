@@ -11,7 +11,7 @@ return {
     },
   },
   opts = {
-    loop_nav = true, 
+    loop_nav = true,
     short_file_names = false,
     short_term_names = true,
     focus_alternate_buffer = false,

@@ -3,7 +3,8 @@
 -- File manager in Neovim backed by yazi, with netrw disabled.
 return {
   "mikavilpas/yazi.nvim",
-  event = "VeryLazy",
+  -- sem `event`: as `keys` abaixo ja carregam, e o `init` (netrw) roda sempre.
+  -- com `open_for_directories = false` nao ha nada para interceptar no startup.
   dependencies = {
     { "nvim-lua/plenary.nvim", lazy = true },
   },

@@ -23,26 +23,40 @@ return {
       yaml = { "yamllint" },
     }
 
-    local grp = vim.api.nvim_create_augroup("user_nvim_lint", { clear = true })
-    -- Executa lint automaticamente em eventos comuns de edicao.
     -- Ignora buffers somente leitura (help, Telescope, plugins etc.)
     -- e respeita o toggle de desativacao por buffer.
+    ---@param bufnr integer
+    local function lintar(bufnr)
+      if bufnr ~= vim.api.nvim_get_current_buf() then
+        return
+      end
+      if not vim.bo[bufnr].modifiable then
+        return
+      end
+      -- desligado via <leader>ul / <leader>un neste buffer
+      if require("util.toggles").lint_desligado(bufnr) then
+        return
+      end
+      lint.try_lint()
+    end
+
+    local grp = vim.api.nvim_create_augroup("user_nvim_lint", { clear = true })
+    -- Executa lint automaticamente em eventos comuns de edicao.
     vim.api.nvim_create_autocmd({ "BufWritePost", "BufReadPost", "InsertLeave" }, {
       group = grp,
       callback = function(args)
-        if args.buf ~= vim.api.nvim_get_current_buf() then
-          return
-        end
-        if not vim.bo[args.buf].modifiable then
-          return
-        end
-        -- desligado via <leader>ul / <leader>un neste buffer
-        if require("util.toggles").lint_desligado(args.buf) then
-          return
-        end
-        lint.try_lint()
+        lintar(args.buf)
       end,
     })
+
+    -- O BufReadPost do primeiro arquivo da sessao e quem carrega este plugin,
+    -- entao ele ja passou quando o autocmd acima e criado.
+    -- `schedule` porque o filetype so e detectado depois deste config; sem ele
+    -- o try_lint nao acha linter nenhum.
+    local buf_inicial = vim.api.nvim_get_current_buf()
+    vim.schedule(function()
+      lintar(buf_inicial)
+    end)
 
     vim.keymap.set("n", "<leader>cl", function()
       lint.try_lint()
