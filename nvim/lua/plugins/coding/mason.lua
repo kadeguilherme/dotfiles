@@ -17,9 +17,9 @@ return {
       },
     },
   },
--- mason-tool-installer.nvim
--- https://github.com/WhoIsSethDaniel/mason-tool-installer.nvim
--- Auto-install and manage a fixed set of Mason packages.
+  -- mason-tool-installer.nvim
+  -- https://github.com/WhoIsSethDaniel/mason-tool-installer.nvim
+  -- Auto-install and manage a fixed set of Mason packages.
   {
     "WhoIsSethDaniel/mason-tool-installer.nvim",
     event = "VeryLazy",
@@ -31,6 +31,7 @@ return {
         "gofumpt", -- Go (formatter)
         "goimports", -- Go (formatter)
         "delve", -- Go (debugger / nvim-dap)
+        "debugpy", -- Python (debugger / nvim-dap)
         "tflint", -- Terraform (linter)
         "yamllint", -- YAML (linter)
         "yamlfmt", -- YAML/Kubernetes (formatter)

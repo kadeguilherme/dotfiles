@@ -13,10 +13,10 @@ return {
     -- <C-Space> abre o menu
     -- <CR> confirma a sugestão selecionada (ou quebra a linha)
     -- <C-E> cancela
-  keymap = {
-    preset = "default",
-    ["<CR>"] = { "accept", "fallback" },
-  },
+    keymap = {
+      preset = "default",
+      ["<CR>"] = { "accept", "fallback" },
+    },
 
     appearance = { nerd_font_variant = "mono" },
 
@@ -31,7 +31,7 @@ return {
     sources = {
       default = { "lsp", "path", "snippets", "buffer", "lazydev" },
       providers = {
-      -- Prioriza sugestões do LazyDev em arquivos Lua.
+        -- Prioriza sugestões do LazyDev em arquivos Lua.
         lazydev = { name = "LazyDev", module = "lazydev.integrations.blink", score_offset = 100 },
       },
     },

@@ -6,7 +6,9 @@ return {
   dependencies = {
     { "rcarriga/nvim-dap-ui", dependencies = { "nvim-neotest/nvim-nio" } },
     "theHamsta/nvim-dap-virtual-text",
-    { "leoluz/nvim-dap-go", ft = "go" },
+    -- sem `ft`: o lazy força as dependências junto do pai, e o config chama
+    -- dap-go.setup() sem condicional
+    "leoluz/nvim-dap-go",
   },
   -- Grupo <leader>d = Debug
   keys = {
@@ -20,7 +22,11 @@ return {
     {
       "<leader>dB",
       function()
-        require("dap").set_breakpoint(vim.fn.input("Condição do breakpoint: "))
+        -- Esc/vazio devolve "", que criaria um breakpoint incondicional calado
+        local cond = vim.fn.input("Condição do breakpoint: ")
+        if cond ~= "" then
+          require("dap").set_breakpoint(cond)
+        end
       end,
       desc = "Debug: breakpoint condicional",
     },
@@ -111,6 +117,23 @@ return {
     dapui.setup()
     require("nvim-dap-virtual-text").setup()
     require("dap-go").setup() -- configura o adapter do delve (dlv) automaticamente
+
+    -- Python: o `debugpy-adapter` vem do mason (ver coding/mason.lua). O guard
+    -- evita registrar um adapter quebrado antes de o mason instalar.
+    local debugpy = vim.fn.exepath("debugpy-adapter")
+    if debugpy ~= "" then
+      dap.adapters.python = { type = "executable", command = debugpy }
+      dap.configurations.python = {
+        {
+          type = "python",
+          request = "launch",
+          name = "Arquivo atual",
+          program = "${file}",
+          console = "integratedTerminal",
+          justMyCode = false,
+        },
+      }
+    end
 
     -- Abre/fecha a UI junto com a sessão de debug
     dap.listeners.before.attach.dapui_config = function()

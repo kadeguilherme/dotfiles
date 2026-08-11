@@ -27,13 +27,6 @@ local function recalcular()
   sujo = false
 end
 
-vim.api.nvim_create_autocmd({ "BufAdd", "BufDelete", "BufWipeout", "BufFilePost" }, {
-  group = vim.api.nvim_create_augroup("user_bufferline_rotulos", { clear = true }),
-  callback = function()
-    sujo = true
-  end,
-})
-
 return {
   "akinsho/bufferline.nvim",
   dependencies = { "nvim-tree/nvim-web-devicons" },
@@ -107,4 +100,14 @@ return {
       },
     },
   },
+  config = function(_, opts)
+    require("bufferline").setup(opts)
+
+    vim.api.nvim_create_autocmd({ "BufAdd", "BufDelete", "BufWipeout", "BufFilePost" }, {
+      group = vim.api.nvim_create_augroup("user_bufferline_rotulos", { clear = true }),
+      callback = function()
+        sujo = true
+      end,
+    })
+  end,
 }

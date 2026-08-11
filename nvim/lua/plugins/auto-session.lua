@@ -15,9 +15,9 @@ return {
     auto_save = true,
     auto_restore = false,
     session_lens = {
-    -- O padrão é `true`, o que registra a extensão do Telescope durante o setup
-    -- do auto-session e força o carregamento de `telescope.nvim` e `plenary.nvim`
-    -- no startup. Mantendo `false`, ambos continuam em lazy-load.
+      -- O padrão é `true`, o que registra a extensão do Telescope durante o setup
+      -- do auto-session e força o carregamento de `telescope.nvim` e `plenary.nvim`
+      -- no startup. Mantendo `false`, ambos continuam em lazy-load.
       load_on_setup = false,
     },
   },

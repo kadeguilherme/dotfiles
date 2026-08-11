@@ -21,7 +21,7 @@ return {
         require("util.toggles").autoformat()
       end,
       desc = "Autoformat ao salvar (buffer)",
-    }
+    },
   },
   opts = {
     formatters_by_ft = {
