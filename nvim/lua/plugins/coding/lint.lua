@@ -30,7 +30,10 @@ return {
     vim.api.nvim_create_autocmd({ "BufWritePost", "BufReadPost", "InsertLeave" }, {
       group = grp,
       callback = function(args)
-        if not vim.bo.modifiable then
+        if args.buf ~= vim.api.nvim_get_current_buf() then
+          return
+        end
+        if not vim.bo[args.buf].modifiable then
           return
         end
         -- desligado via <leader>ul / <leader>un neste buffer
