@@ -28,7 +28,14 @@ return {
 				},
 			},
 			bashls = {},
-			jsonls = {},
+			jsonls = {
+				settings = {
+					json = {
+						schemas = require("schemastore").json.schemas(),
+						validate = { enable = true },
+					},
+				},
+			},
 			yamlls = {
 				settings = {
 					yaml = {
@@ -100,20 +107,6 @@ return {
 				init_options = {
 					ignoreSingleFileWarning = true,
 				},
-				on_attach = function(_, bufnr)
-					if vim.lsp.codelens.enable then
-						vim.lsp.codelens.enable(true, { bufnr = bufnr })
-					else
-						vim.lsp.codelens.refresh({ bufnr = bufnr })
-						vim.api.nvim_create_autocmd({ "BufEnter", "InsertLeave" }, {
-							buffer = bufnr,
-							group = vim.api.nvim_create_augroup("user_codelens_" .. bufnr, { clear = true }),
-							callback = function()
-								vim.lsp.codelens.refresh({ bufnr = bufnr })
-							end,
-						})
-					end
-				end,
 			},
 			pyright = {
 				settings = {
@@ -123,7 +116,14 @@ return {
 					},
 				},
 			},
-			ruff = {}, -- lint + format de Python (server separado do pyright)
+			-- lint + format de Python (server separado do pyright)
+			ruff = {
+				-- O pyright cuida de hover/documentação. Sem isto os dois servers
+				-- respondem `textDocument/hover` e o K abre a doc duplicada.
+				on_attach = function(client)
+					client.server_capabilities.hoverProvider = false
+				end,
+			},
 		}
 
 		-- Capabilities do blink.cmp aplicadas a TODOS os servers
@@ -172,17 +172,32 @@ return {
 					vim.keymap.set(mode, keys, fn, { buffer = event.buf, desc = "LSP: " .. desc })
 				end
 
-				local tb = require("telescope.builtin")
-				map("gd", tb.lsp_definitions, "Ir para definição")
-				map("gr", tb.lsp_references, "Referências")
-				map("gI", tb.lsp_implementations, "Implementações")
-				map("gy", tb.lsp_type_definitions, "Definição de tipo")
-				map("gD", vim.lsp.buf.declaration, "Declaração")
+				-- Pickers do Telescope resolvidos NA TECLA, não aqui: `require` no
+				-- corpo do LspAttach aborta o callback inteiro se o telescope não
+				-- estiver disponível (nenhum keymap abaixo seria criado) e força o
+				-- load dele no primeiro arquivo aberto, matando o lazy-load.
+				---@param builtin string picker de `telescope.builtin`
+				---@param fallback function equivalente nativo do vim.lsp.buf
+				local function pick(builtin, fallback)
+					return function()
+						local ok, tb = pcall(require, "telescope.builtin")
+						if ok and tb[builtin] then
+							tb[builtin]()
+						else
+							fallback()
+						end
+					end
+				end
+
+				map("gd", pick("lsp_definitions", vim.lsp.buf.definition), "Ir para definição")
+				map("gr", pick("lsp_references", vim.lsp.buf.references), "Referências")
+				map("gI", pick("lsp_implementations", vim.lsp.buf.implementation), "Implementações")
+				map("gy", pick("lsp_type_definitions", vim.lsp.buf.type_definition), "Definição de tipo")
 				map("K", vim.lsp.buf.hover, "Hover / documentação")
 				map("<leader>cr", vim.lsp.buf.rename, "Renomear símbolo")
 				map("<leader>ca", vim.lsp.buf.code_action, "Code action", { "n", "v" })
 				map("<leader>cd", vim.diagnostic.open_float, "Diagnóstico da linha")
-				map("<leader>cs", tb.lsp_document_symbols, "Símbolos do documento")
+				map("<leader>cs", pick("lsp_document_symbols", vim.lsp.buf.document_symbol), "Símbolos do documento")
 				map("[d", function()
 					vim.diagnostic.jump({ count = -1, float = true })
 				end, "Diagnóstico anterior")
@@ -190,9 +205,37 @@ return {
 					vim.diagnostic.jump({ count = 1, float = true })
 				end, "Próximo diagnóstico")
 
+				local client = vim.lsp.get_client_by_id(event.data.client_id)
+
+				-- `textDocument/declaration` é raro (gopls, lua_ls e pyright não
+				-- implementam); só mapeia gD onde o server realmente responde.
+				if client and client:supports_method("textDocument/declaration") then
+					map("gD", vim.lsp.buf.declaration, "Declaração")
+				end
+
+				-- Codelens: terraformls (init/validate) e gopls (run test, generate, tidy).
+				if client and client:supports_method("textDocument/codeLens") then
+					if vim.lsp.codelens.enable then
+						-- Neovim >= 0.12: o próprio core cuida do refresh
+						vim.lsp.codelens.enable(true, { bufnr = event.buf })
+					else
+						-- 0.11.x: refresh manual nos eventos de edição
+						vim.lsp.codelens.refresh({ bufnr = event.buf })
+						vim.api.nvim_create_autocmd({ "BufEnter", "InsertLeave" }, {
+							buffer = event.buf,
+							group = vim.api.nvim_create_augroup("user_codelens_" .. event.buf, { clear = true }),
+							callback = function()
+								vim.lsp.codelens.refresh({ bufnr = event.buf })
+							end,
+						})
+					end
+					map("<leader>cc", function()
+						vim.lsp.codelens.run()
+					end, "Rodar codelens")
+				end
+
 				-- Inlay hints com toggle (se o server suportar)
 				-- defauft: false para nao mostra
-				local client = vim.lsp.get_client_by_id(event.data.client_id)
 				if client and client:supports_method("textDocument/inlayHint") then
 					vim.lsp.inlay_hint.enable(false, { bufnr = event.buf })
 					map("<leader>ch", function()
