@@ -1,7 +1,6 @@
 -- mason.nvim
 -- https://github.com/mason-org/mason.nvim
 -- Manage LSP servers, linters and formatters as external packages.
-
 return {
   {
     "mason-org/mason.nvim",
