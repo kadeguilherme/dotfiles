@@ -1,3 +1,6 @@
+-- telescope.nvim
+-- https://github.com/nvim-telescope/telescope.nvim
+-- Fuzzy finder: files, grep, buffers and the LSP pickers used in coding/lsp.lua.
 return {
   "nvim-telescope/telescope.nvim",
   cmd = "Telescope", -- garante que :Telescope funcione (ex: botões do alpha)
@@ -7,12 +10,17 @@ return {
       -- sorter em C: diferença bem visível no live_grep de repo grande
       "nvim-telescope/telescope-fzf-native.nvim",
       build = "make",
-      -- se o `make` falhar (sem gcc/make), o telescope segue com o sorter em Lua
+      -- sem `make` a dependência nem entra no spec
       cond = function()
         return vim.fn.executable("make") == 1
       end,
+      -- o `cond` acima só garante que o `make` EXISTE; se a compilação falhar
+      -- (sem gcc, header faltando), `require "fzf_lib"` estoura aqui dentro.
+      -- Com o pcall o telescope segue com o sorter em Lua, só mais lento.
       config = function()
-        require("telescope").load_extension("fzf")
+        if not pcall(require("telescope").load_extension, "fzf") then
+          vim.notify("fzf-native não compilado (:Lazy build); usando o sorter em Lua", vim.log.levels.WARN)
+        end
       end,
     },
   },
@@ -30,14 +38,23 @@ return {
     -- Encurtar o display NÃO atrapalha a busca: o telescope filtra pelo campo
     -- `ordinal`, que segue com o caminho completo, então dá para digitar
     -- "shard-abcd" mesmo o rótulo mostrando "pads/terragrunt.hcl".
-    local function pasta_e_arquivo(_, path)
-      local paths = require("util.paths")
-      return paths.unique_suffix(path, paths.listed_buffer_names(), 2)
+    --
+    -- A referência é uma função, resolvida no render: os buffers abertos mudam
+    -- entre uma abertura do picker e a seguinte. O util.paths memoiza o índice,
+    -- então repetir a mesma lista a cada tecla não recalcula nada.
+    ---@param referencia fun(): string[]
+    local function pasta_e_arquivo(referencia)
+      return function(_, path)
+        return require("util.paths").unique_suffix(path, referencia(), 2)
+      end
     end
 
     return {
       defaults = {
-        file_ignore_patterns = { "%.git/", "node_modules/" }, -- ignora ruído nas buscas
+        -- `%.git/` sem ancorar, para pegar submódulo e repo aninhado também.
+        -- `.terraform/` guarda providers e módulos vendorizados: sem isto o
+        -- live_grep em monorepo de shards vem inundado deles.
+        file_ignore_patterns = { "%.git/", "node_modules/", "%.terraform/", "vendor/" },
 
         -- O default do telescope ancora o caminho à ESQUERDA e corta a direita,
         -- que em monorepo profundo mostra só o prefixo que todos compartilham.
@@ -57,13 +74,20 @@ return {
           hidden = true, -- acha também arquivos ocultos (.env, .gitignore, ...)
         },
         buffers = {
-          path_display = pasta_e_arquivo,
+          path_display = pasta_e_arquivo(function()
+            return require("util.paths").listed_buffer_names()
+          end),
           sort_mru = true, -- mais recentes primeiro, em vez de ordem de bufnr
           ignore_current_buffer = true, -- não lista onde você já está
           disable_coordinates = true, -- tira o ":1" que não diz nada aqui
         },
         oldfiles = {
-          path_display = pasta_e_arquivo,
+          -- Desambigua contra os PRÓPRIOS recentes, não contra os buffers: um
+          -- arquivo do oldfiles quase nunca está aberto, então comparar com os
+          -- buffers daria o mesmo rótulo para `shard-a/main.tf` e `shard-b/main.tf`.
+          path_display = pasta_e_arquivo(function()
+            return vim.v.oldfiles
+          end),
         },
       },
     }
