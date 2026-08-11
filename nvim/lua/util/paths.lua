@@ -58,15 +58,30 @@ end
 -- só a última já evita reconstruir.
 local ultimo = {}
 
+---@param a string[]|nil
+---@param b string[]|nil
+---@return boolean
+local function mesma_lista(a, b)
+	if a == b then
+		return true
+	end
+	if a == nil or b == nil or #a ~= #b then
+		return false
+	end
+	for i = 1, #a do
+		if a[i] ~= b[i] then
+			return false
+		end
+	end
+	return true
+end
+
 ---@param referencia string[]
 ---@param piso integer
 ---@return table<string, integer>
 local function indice(referencia, piso)
-	-- Assinatura pelo conteúdo, e não por `#referencia`: trocar um caminho sem
-	-- mudar a quantidade também tem de invalidar.
-	local assinatura = table.concat(referencia, "\0")
-	if ultimo.assinatura ~= assinatura or ultimo.piso ~= piso then
-		ultimo = { assinatura = assinatura, piso = piso, contagem = contar_sufixos(referencia, piso) }
+	if ultimo.piso ~= piso or not mesma_lista(ultimo.referencia, referencia) then
+		ultimo = { referencia = referencia, piso = piso, contagem = contar_sufixos(referencia, piso) }
 	end
 	return ultimo.contagem
 end
@@ -128,10 +143,16 @@ function M.unique_suffixes(lista, min_parts)
 	return saida
 end
 
+local nomes_cache, nomes_sujo = {}, true
+
 ---Buffers listados, sem `[No Name]` nem pseudo-caminho de plugin (`term://` do
 ---lazygit, `fugitive://`), que viram rótulo sem sentido.
+---
 ---@return string[]
 function M.listed_buffer_names()
+	if not nomes_sujo then
+		return nomes_cache
+	end
 	local nomes = {}
 	for _, b in ipairs(vim.api.nvim_list_bufs()) do
 		local nome = vim.api.nvim_buf_get_name(b)
@@ -139,7 +160,22 @@ function M.listed_buffer_names()
 			table.insert(nomes, nome)
 		end
 	end
-	return nomes
+	nomes_cache, nomes_sujo = nomes, false
+	return nomes_cache
 end
+
+vim.api.nvim_create_autocmd({ "BufAdd", "BufDelete", "BufWipeout", "BufFilePost" }, {
+	group = vim.api.nvim_create_augroup("user_paths_buffers", { clear = true }),
+	callback = function()
+		nomes_sujo = true
+	end,
+})
+vim.api.nvim_create_autocmd("OptionSet", {
+	group = "user_paths_buffers",
+	pattern = "buflisted",
+	callback = function()
+		nomes_sujo = true
+	end,
+})
 
 return M

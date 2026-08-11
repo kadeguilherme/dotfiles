@@ -49,9 +49,16 @@ local MIN_CAMINHO = 30
 -- filetype, progresso, posição). Medido em 39 com filetype curto.
 local OVERHEAD = 38
 
+local reservado_cache = {}
+
 ---@return integer
 local function largura_reservada()
 	local bufnr = vim.api.nvim_get_current_buf()
+	local memo = reservado_cache[bufnr]
+	if memo then
+		return memo
+	end
+
 	local total = OVERHEAD
 
 	local ok, gb = pcall(require, "lualine.components.branch.git_branch")
@@ -76,6 +83,7 @@ local function largura_reservada()
 		end
 	end
 
+	reservado_cache[bufnr] = total
 	return total
 end
 
@@ -151,14 +159,32 @@ local function caminho()
 	return "%<" .. texto
 end
 
+local grp_cache = vim.api.nvim_create_augroup("user_lualine_cache", { clear = true })
+
 vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout", "DirChanged" }, {
-	group = vim.api.nvim_create_augroup("user_lualine_cache", { clear = true }),
+	group = grp_cache,
 	callback = function(ev)
 		if ev.event == "DirChanged" then
 			cache = {}
+			reservado_cache = {}
 		else
 			cache[ev.buf] = nil
+			reservado_cache[ev.buf] = nil
 		end
+	end,
+})
+
+vim.api.nvim_create_autocmd({ "DiagnosticChanged", "BufEnter", "WinEnter", "TermClose" }, {
+	group = grp_cache,
+	callback = function()
+		reservado_cache = {}
+	end,
+})
+vim.api.nvim_create_autocmd("User", {
+	group = grp_cache,
+	pattern = "GitSignsUpdate",
+	callback = function()
+		reservado_cache = {}
 	end,
 })
 
