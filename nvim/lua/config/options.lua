@@ -13,7 +13,7 @@ vim.opt.expandtab = true
 vim.opt.tabstop = 4
 vim.opt.shiftwidth = 4
 vim.opt.softtabstop = 4
-vim.opt.smartindent = true
+vim.opt.smartindent = false
 
 -- busca
 vim.opt.ignorecase = true
@@ -48,6 +48,21 @@ vim.keymap.set("n", "<Esc>", "<cmd>nohlsearch<cr>", { desc = "Limpar realce da b
 -- mantem a selecao apos indentar em modo visual
 vim.keymap.set("v", "<", "<gv", { desc = "Desindentar mantendo seleção" })
 vim.keymap.set("v", ">", ">gv", { desc = "Indentar mantendo seleção" })
+
+-- git remoto: commit / PR / permalink da linha sob o cursor (ver lua/util/git.lua).
+-- Sufixos escolhidos para nao colidir com os mapas (buffer-local) do gitsigns,
+-- que ja usam gs gr gb gp gd gS gR gB gD.
+vim.keymap.set("n", "<leader>gc", function()
+  require("util.git").open_commit()
+end, { desc = "Abrir commit da linha no navegador" })
+
+vim.keymap.set("n", "<leader>gP", function()
+  require("util.git").open_pr()
+end, { desc = "Abrir PR que introduziu a linha" })
+
+vim.keymap.set("n", "<leader>gy", function()
+  require("util.git").yank_permalink()
+end, { desc = "Copiar permalink da linha (fixado no SHA)" })
 
 -- tmux: abre pane no diretorio do buffer atual
 local function tmux_split(orientation)
