@@ -41,8 +41,8 @@ local function encurtar(rel, orcamento)
 	return partes[#partes]
 end
 
-local ICONE_REPO = ""
-local ICONE_DIR = ""
+local ICONE_REPO = ""
+local ICONE_DIR = ""
 
 local MIN_CAMINHO = 30
 

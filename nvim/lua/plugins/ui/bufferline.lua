@@ -58,10 +58,10 @@ return {
       diagnostics_indicator = function(_, _, diag)
         local partes = {}
         if diag.error then
-          table.insert(partes, " " .. diag.error)
+          table.insert(partes, " " .. diag.error)
         end
         if diag.warning then
-          table.insert(partes, " " .. diag.warning)
+          table.insert(partes, " " .. diag.warning)
         end
         return table.concat(partes, " ")
       end,
