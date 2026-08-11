@@ -1,0 +1,17 @@
+gui:
+  theme:
+    selectedLineBgColor:
+      - "#453D5C"  # highlight selected line in diff view
+
+customCommands:
+  - key: "G"
+    context: "files"
+    description: "Commit com mensagem gerada pelo Claude"
+    command: "git-ai-commit"
+    output: terminal
+
+  - key: "P"
+    context: "localBranches"
+    description: "PR com descrição gerada pelo Claude"
+    command: "git-ai-pr"
+    output: terminal
