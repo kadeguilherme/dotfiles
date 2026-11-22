@@ -1,5 +1,7 @@
 -- copilot.lua
 -- https://github.com/zbirenbaum/copilot.lua
+-- Quando o plano do Copilot acabar, o substituto está pronto em ia/minuet.lua
+-- (Codestral/Mistral): siga os passos do cabeçalho de lá.
 return {
   "zbirenbaum/copilot.lua",
   event = "InsertEnter",

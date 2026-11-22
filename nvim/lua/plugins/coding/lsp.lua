@@ -124,6 +124,10 @@ return {
           client.server_capabilities.hoverProvider = false
         end,
       },
+      -- Servidor LSP do Copilot, usado SÓ pelo sidekick.nvim (próxima edição com
+      -- <Tab>). O ghost text continua vindo do copilot.lua; os dois usam o mesmo
+      -- login. Remova esta linha se o plano do Copilot acabar.
+      copilot = {},
     }
 
     -- Capabilities do blink.cmp aplicadas a TODOS os servers

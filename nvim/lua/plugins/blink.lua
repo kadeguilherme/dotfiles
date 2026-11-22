@@ -16,6 +16,15 @@ return {
     keymap = {
       preset = "default",
       ["<CR>"] = { "accept", "fallback" },
+      -- <Tab>: pula no snippet; senão aplica a próxima edição do sidekick; senão tab normal
+      ["<Tab>"] = {
+        "snippet_forward",
+        function()
+          local ok, sidekick = pcall(require, "sidekick")
+          return ok and sidekick.nes_jump_or_apply()
+        end,
+        "fallback",
+      },
     },
 
     appearance = { nerd_font_variant = "mono" },

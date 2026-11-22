@@ -7,6 +7,7 @@ return {
   opts = {
     -- Nomes dos grupos de prefixo. Sem isso o popup mostra só "+prefix".
     spec = {
+      { "<leader>a", group = "IA (sidekick)" },
       { "<leader>b", group = "buffer" },
       { "<leader>c", group = "code / LSP" },
       { "<leader>d", group = "debug" },
