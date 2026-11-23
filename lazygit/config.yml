@@ -11,11 +11,11 @@ gui:
 customCommands:
   - key: "G"
     context: "files"
-    description: "Commit com mensagem gerada pelo Claude"
+    description: "Commit com mensagem gerada pela IA"
     command: "git-ai-commit"
     output: terminal
   - key: "P"
     context: "localBranches"
-    description: "PR com descrição gerada pelo Claude"
+    description: "PR com descrição gerada pela IA"
     command: "git-ai-pr"
     output: terminal
