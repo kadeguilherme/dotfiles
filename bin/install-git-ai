@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+#
+# install-git-ai — instala o git-ai-commit e o git-ai-pr nesta máquina.
+#
+# Idempotente: pode rodar de novo sem estragar nada. Não sobrescreve config do
+# lazygit já existente nem arquivo de credencial já preenchido.
+#
+#   ./bin/install-git-ai
+#
+# Rode a partir da raiz do repositório de dotfiles.
+
+set -euo pipefail
+
+AQUI=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+DESTINO="$HOME/.local/bin"
+LAZYGIT_CFG="$HOME/.config/lazygit/config.yml"
+CRED="$HOME/.config/git-ai/credentials"
+
+ok()    { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+aviso() { printf '  \033[33m!\033[0m %s\n' "$*"; }
+erro()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
+
+printf '\n\033[1mDependências\033[0m\n'
+FALTA=0
+for bin in git jq curl; do
+  if command -v "$bin" >/dev/null; then
+    ok "$bin"
+  else
+    erro "$bin — obrigatório"
+    FALTA=1
+  fi
+done
+
+# Os dois scripts aceitam qualquer um dos backends e caem do claude para o
+# opencode sozinhos — basta um deles estar instalado.
+if command -v claude >/dev/null; then
+  ok "claude — backend preferido"
+else
+  aviso "claude ausente — os dois scripts usam o opencode"
+fi
+if command -v opencode >/dev/null; then
+  ok "opencode — fallback quando o claude falha ou não está autenticado"
+else
+  aviso "opencode ausente — sem ele não há fallback se o claude falhar"
+fi
+if ! command -v claude >/dev/null && ! command -v opencode >/dev/null; then
+  erro "nenhum backend de IA instalado — instale o claude ou o opencode"
+  FALTA=1
+fi
+
+if command -v gh >/dev/null; then
+  ok "gh ($(gh --version 2>/dev/null | head -1 | awk '{print $3}')) — só necessário para repos do GitHub"
+else
+  aviso "gh ausente — Bitbucket funciona; repos do GitHub não"
+fi
+command -v lazygit >/dev/null && ok "lazygit" || aviso "lazygit ausente — os scripts funcionam no terminal mesmo assim"
+[ "$FALTA" = 0 ] || { printf '\nInstale o que falta e rode de novo.\n'; exit 1; }
+
+printf '\n\033[1mScripts\033[0m\n'
+# A lib não é symlinkada: os scripts a encontram pelo próprio caminho real
+# (readlink -f do $0), então ela só precisa estar ao lado deles no repo.
+if [ -r "$AQUI/bin/lib/ai-backend.sh" ]; then
+  ok "lib/ai-backend.sh (escolha de backend, compartilhada pelos dois scripts)"
+else
+  # O guard de FALTA lá em cima já passou, então aqui a saída é imediata.
+  erro "bin/lib/ai-backend.sh não está no repo — os scripts não vão rodar"
+  exit 1
+fi
+mkdir -p "$DESTINO"
+for s in git-ai-commit git-ai-pr test-git-ai; do
+  chmod +x "$AQUI/bin/$s"
+  ln -sfn "$AQUI/bin/$s" "$DESTINO/$s"
+  ok "$DESTINO/$s → $AQUI/bin/$s"
+done
+
+case ":$PATH:" in
+  *":$DESTINO:"*) ok "$DESTINO está no PATH" ;;
+  *) aviso "$DESTINO NÃO está no PATH — acrescente ao seu shell rc:
+       export PATH=\"\$PATH:\$HOME/.local/bin\"" ;;
+esac
+
+printf '\n\033[1mCredencial\033[0m\n'
+mkdir -p "$(dirname "$CRED")"
+if [ -f "$CRED" ]; then
+  ok "$CRED já existe (não toquei)"
+else
+  cp "$AQUI/git-ai/credentials.example" "$CRED"
+  chmod 600 "$CRED"
+  aviso "criei $CRED a partir do exemplo — PREENCHA user= e token="
+fi
+
+printf '\n\033[1mlazygit\033[0m\n'
+mkdir -p "$(dirname "$LAZYGIT_CFG")"
+if [ ! -e "$LAZYGIT_CFG" ]; then
+  ln -sfn "$AQUI/lazygit/config.yml" "$LAZYGIT_CFG"
+  ok "$LAZYGIT_CFG → $AQUI/lazygit/config.yml"
+elif [ -L "$LAZYGIT_CFG" ] && [ "$(readlink -f "$LAZYGIT_CFG")" = "$AQUI/lazygit/config.yml" ]; then
+  ok "$LAZYGIT_CFG já aponta para o dotfiles"
+else
+  # Config próprio na máquina: sobrescrever apagaria ajuste que não é meu.
+  aviso "$LAZYGIT_CFG já existe e não é deste repo — não vou sobrescrever."
+  printf '\n    Acrescente este bloco a ele (ou mescle com o customCommands que já tiver):\n\n'
+  sed -n '/^customCommands:/,$p' "$AQUI/lazygit/config.yml" | sed 's/^/    /'
+  printf '\n'
+fi
+
+printf '\n\033[1mPróximos passos\033[0m\n'
+printf '  1. Preencher %s\n' "$CRED"
+printf '     user  = e-mail da conta (obrigatório se for API token, que usa Basic)\n'
+printf '     token = o token, com escopo pullrequest:write\n'
+printf '  2. Em cada repo que usar conta diferente da do ~/.netrc:\n'
+printf '       git config git-ai.credentials %s\n' "$CRED"
+printf '  3. Conferir: test-git-ai        (38 casos, sem custo de modelo)\n'
+printf '  4. Usar: no lazygit, G no painel de arquivos, P no de branches\n\n'

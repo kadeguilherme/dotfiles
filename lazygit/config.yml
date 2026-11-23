@@ -1,15 +1,19 @@
+git:
+  pagers:
+    - colorArg: always
+      # delta como pager dos diffs. --paging=never é obrigatório dentro do lazygit.
+      # Os links nos números de linha abrem o arquivo no editor ao clicar (terminais com OSC 8).
+      pager: delta --dark --paging=never --line-numbers --hyperlinks --hyperlinks-file-link-format="lazygit-edit://{path}:{line}"
 gui:
   theme:
     selectedLineBgColor:
-      - "#453D5C"  # highlight selected line in diff view
-
+      - "#453D5C" # highlight selected line in diff view
 customCommands:
   - key: "G"
     context: "files"
     description: "Commit com mensagem gerada pelo Claude"
     command: "git-ai-commit"
     output: terminal
-
   - key: "P"
     context: "localBranches"
     description: "PR com descrição gerada pelo Claude"

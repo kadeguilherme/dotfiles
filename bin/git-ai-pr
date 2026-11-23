@@ -1,0 +1,499 @@
+#!/usr/bin/env bash
+#
+# git-ai-pr — gera a descrição da PR com IA e abre a PR.
+#
+# Chamado pelo lazygit (tecla P no painel de branches), mas funciona sozinho no
+# terminal. Detecta o forge pelo remote: Bitbucket via REST API v2.0, GitHub via
+# `gh`. Nada é criado sem confirmação explícita.
+#
+# O backend preferido é o Claude Code. Se ele não estiver instalado, não estiver
+# autenticado, ou a chamada falhar (rede, limite de uso, erro do provider), o
+# script cai automaticamente para o OpenCode. O template de cinco seções é
+# validado do mesmo jeito nos dois casos — o fallback não relaxa o contrato.
+#
+# Variáveis de ambiente:
+#   BITBUCKET_ACCESS_TOKEN  token com escopo pullrequest:write. Se ausente, cai
+#                           para o ~/.netrc (curl -n).
+#   AI_PR_BACKEND           auto | claude | opencode (default: auto)
+#                           'auto' tenta o Claude e cai para o OpenCode.
+#                           'claude' e 'opencode' fixam o backend, sem fallback.
+#   AI_PR_MODEL             modelo do Claude (default: sonnet)
+#   AI_PR_MODEL_OPENCODE    modelo do OpenCode, no formato provider/modelo
+#                           (default: vazio — usa o default do próprio OpenCode)
+#   AI_PR_MAX_DIFF_LINES    teto de linhas do patch enviado (default: 2000)
+#
+# Uso: git-ai-pr [--dry-run]
+
+set -euo pipefail
+
+DRY_RUN=0
+[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+
+MAX_DIFF_LINES="${AI_PR_MAX_DIFF_LINES:-2000}"
+
+# Marcador que separa título e corpo na resposta do modelo. Precisa ser algo que
+# não apareça em texto normal, para o fatiamento ser determinístico.
+#
+# Não pode começar com "-": grep e sed tratariam o argumento como opção. Também
+# não pode conter "/", que quebraria os endereços do sed abaixo.
+MARCADOR="@@@CORPO@@@"
+
+erro() { printf '\033[31merro:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m%s\033[0m\n' "$*" >&2; }
+ok()   { printf '\033[32m%s\033[0m\n' "$*" >&2; }
+
+for bin in git jq curl; do
+  command -v "$bin" >/dev/null || erro "$bin não está instalado"
+done
+
+# A escolha do backend e o fallback vivem na lib, compartilhada com o
+# git-ai-commit. `readlink -f` porque o script normalmente é chamado por symlink
+# em ~/.local/bin.
+AI_BACKEND="${AI_PR_BACKEND:-auto}"
+AI_MODEL="${AI_PR_MODEL:-sonnet}"
+AI_MODEL_OC="${AI_PR_MODEL_OPENCODE:-}"
+AI_VAR_BACKEND=AI_PR_BACKEND
+LIB="$(dirname "$(readlink -f "$0")")/lib/ai-backend.sh"
+[ -r "$LIB" ] || erro "não achei a lib de backend em $LIB"
+# shellcheck source=lib/ai-backend.sh
+. "$LIB"
+
+# Decidido aqui, junto das outras dependências: descobrir que não há backend
+# depois de autenticar no Bitbucket e consultar a API seria desperdício.
+escolher_backend
+
+# ---------------------------------------------------------------- contexto git
+
+git rev-parse --git-dir >/dev/null 2>&1 || erro "não estamos num repositório git"
+
+BRANCH=$(git branch --show-current)
+[ -n "$BRANCH" ] || erro "HEAD destacado — troque para uma branch antes"
+
+# A base nunca é fixa: entre os repos daqui convivem `main` e `master`, então
+# hardcodar qualquer um dos dois quebraria metade deles.
+BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
+if [ -z "$BASE" ]; then
+  for candidato in main master; do
+    if git show-ref --verify --quiet "refs/remotes/origin/$candidato"; then
+      BASE="$candidato"
+      break
+    fi
+  done
+fi
+[ -n "$BASE" ] || erro "não consegui descobrir a branch base (origin/HEAD ausente e não há origin/main nem origin/master)"
+
+[ "$BRANCH" != "$BASE" ] || erro "você está na própria branch base ($BASE) — crie uma branch de trabalho"
+
+# Atualiza a referência da base antes de comparar; sem isso o diff pode sair
+# inflado por commits que já estão na base há dias.
+git fetch --quiet origin "$BASE" 2>/dev/null || info "aviso: não consegui atualizar origin/$BASE, seguindo com o que está em cache"
+
+COMMITS=$(git rev-list --count "origin/$BASE..HEAD" 2>/dev/null || echo 0)
+[ "$COMMITS" -gt 0 ] || erro "não há commits à frente de origin/$BASE — nada para abrir PR"
+
+# ------------------------------------------------------------- remote e forge
+
+URL=$(git remote get-url origin 2>/dev/null) || erro "o repositório não tem remote 'origin'"
+LIMPA=${URL%.git}
+case "$LIMPA" in
+  *://*)                       # https://host/owner/repo  ou  ssh://git@host:22/owner/repo
+    RESTO=${LIMPA#*://}; RESTO=${RESTO#*@}
+    HOST=${RESTO%%/*}; HOST=${HOST%%:*}
+    CAMINHO=${RESTO#*/} ;;
+  *@*:*)                       # git@host:owner/repo  (formato SSH mais comum)
+    RESTO=${LIMPA#*@}
+    HOST=${RESTO%%:*}
+    CAMINHO=${RESTO#*:} ;;
+  *) erro "não sei interpretar o remote: $URL" ;;
+esac
+
+WORKSPACE=${CAMINHO%%/*}
+REPO=${CAMINHO##*/}
+
+case "$HOST" in
+  *bitbucket*) FORGE=bitbucket ;;
+  *github*)    FORGE=github ;;
+  *) erro "forge não suportado: $HOST (só Bitbucket e GitHub)" ;;
+esac
+
+[ "$FORGE" != "github" ] || command -v gh >/dev/null || erro "repo do GitHub mas o 'gh' não está instalado"
+
+# ------------------------------------------------------------------- tickets
+
+# Branches daqui costumam carregar o ticket no nome, por exemplo:
+#   change/CHG-2026-0143-PLAT-8489-eks-upgrade-go0t
+#
+# O CHG é descartado, e não repassado ao modelo: nem toda branch tem um, e
+# mencioná-lo só às vezes deixaria as descrições inconsistentes entre si. Mas
+# ele precisa ser *removido* antes de procurar o ticket — o padrão genérico
+# abaixo casaria "CHG-2026" e o PLAT-8489 real passaria batido.
+CHG=$(printf '%s' "$BRANCH" | grep -oiE 'CHG-[0-9]{4}-[0-9]+' | head -1 || true)
+if [ -n "$CHG" ]; then
+  SEM_CHG=${BRANCH//"$CHG"/}
+else
+  SEM_CHG=$BRANCH
+fi
+TICKET=$(printf '%s' "$SEM_CHG" | grep -oiE '[A-Z][A-Z0-9]{1,9}-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]' || true)
+
+# ------------------------------------------------------- branch está no remote?
+
+if ! git rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
+  info "a branch '$BRANCH' ainda não existe em origin."
+  read -r -p "Fazer push agora? [s/N] " resp </dev/tty
+  case "$resp" in
+    s|S|y|Y) git push -u origin "$BRANCH" ;;
+    *) erro "sem a branch no remote não dá para abrir PR" ;;
+  esac
+elif [ -n "$(git rev-list "origin/$BRANCH..HEAD" 2>/dev/null)" ]; then
+  info "há commits locais que não estão em origin/$BRANCH."
+  read -r -p "Fazer push agora? [s/N] " resp </dev/tty
+  case "$resp" in
+    s|S|y|Y) git push origin "$BRANCH" ;;
+    *) info "seguindo assim — a PR não vai incluir os commits locais" ;;
+  esac
+fi
+
+# ------------------------------------------------------------- auth Bitbucket
+
+API="https://api.bitbucket.org/2.0/repositories/$WORKSPACE/$REPO"
+
+# Cascata de credencial, da mais específica para a mais geral:
+#
+#   1. $GIT_AI_CREDENTIALS  — arquivo "user=" / "token=", modo 600
+#   2. $BITBUCKET_ACCESS_TOKEN
+#   3. ~/.netrc  (o curl lê sozinho com -n)
+#
+# O arquivo existe porque o .netrc é indexado por HOST: quem tem duas contas no
+# api.bitbucket.org (trabalho e pessoal) não consegue guardar as duas lá. E o
+# token não pode vir por argumento — acabaria no histórico do shell.
+BB_USER=""
+BB_TOKEN=""
+BB_ORIGEM=""
+
+# Além da variável, aceita `git config git-ai.credentials` — que é por
+# repositório. Importante para o fluxo pelo lazygit: ali o script herda o
+# ambiente do Neovim, então exigir uma variável exportada antes de abrir o
+# editor seria fácil de esquecer, e esquecer significa agir com a conta errada.
+CRED_CFG=$(git config --get git-ai.credentials 2>/dev/null || true)
+
+if [ -n "${GIT_AI_CREDENTIALS:-}${CRED_CFG}" ]; then
+  CRED_FILE=${GIT_AI_CREDENTIALS:-$CRED_CFG}
+  CRED_FILE=${CRED_FILE/#\~/$HOME}
+  [ -r "$CRED_FILE" ] || erro "GIT_AI_CREDENTIALS aponta para '$CRED_FILE', que não dá para ler"
+
+  perm=$(stat -c '%a' "$CRED_FILE" 2>/dev/null || echo "?")
+  case "$perm" in
+    600|400) ;;
+    *) info "aviso: $CRED_FILE está com permissão $perm — o esperado é 600" ;;
+  esac
+
+  # Lido com `read` em vez de `source`: o arquivo guarda segredo, não é para
+  # executar nada que esteja escrito nele.
+  while IFS='=' read -r chave valor; do
+    case "$chave" in
+      user)  BB_USER=$valor ;;
+      token) BB_TOKEN=$valor ;;
+    esac
+  done <"$CRED_FILE"
+
+  [ -n "$BB_TOKEN" ] || erro "não achei a linha 'token=' em $CRED_FILE"
+
+  # O arquivo nasce com placeholder. Sem esta checagem o sintoma seria um 401
+  # genérico, e você iria procurar o problema no token em vez de no arquivo.
+  case "$BB_TOKEN" in
+    COLE_SEU_TOKEN_AQUI*) erro "o token em $CRED_FILE ainda é o placeholder — preencha a linha 'token='" ;;
+  esac
+  case "$BB_USER" in
+    COLE_SEU_EMAIL_AQUI*) BB_USER="" ;;  # e-mail não preenchido: tenta Bearer
+  esac
+
+  if [ -n "${GIT_AI_CREDENTIALS:-}" ]; then
+    BB_ORIGEM="arquivo $CRED_FILE (via GIT_AI_CREDENTIALS)"
+  else
+    BB_ORIGEM="arquivo $CRED_FILE (via git config git-ai.credentials)"
+  fi
+elif [ -n "${BITBUCKET_ACCESS_TOKEN:-}" ]; then
+  BB_TOKEN=$BITBUCKET_ACCESS_TOKEN
+  BB_USER=${BITBUCKET_USER:-}
+  BB_ORIGEM="variável BITBUCKET_ACCESS_TOKEN"
+else
+  BB_ORIGEM="~/.netrc"
+fi
+
+# O Bitbucket tem três tipos de credencial e eles NÃO são intercambiáveis:
+# access token é Bearer; API token e app password são Basic. Havendo usuário,
+# Basic; senão tenta Bearer e cai para Basic num 401, que é o sintoma exato de
+# ter mandado um API token como Bearer.
+BB_MODO=""
+bb() {
+  case "$BB_ORIGEM" in
+    "~/.netrc") curl -sS -n "$@" ;;
+    *)
+      if [ -n "$BB_USER" ]; then
+        BB_MODO="Basic ($BB_USER)"
+        curl -sS -u "$BB_USER:$BB_TOKEN" "$@"
+      else
+        BB_MODO="Bearer"
+        curl -sS -H "Authorization: Bearer $BB_TOKEN" "$@"
+      fi
+      ;;
+  esac
+}
+
+# Quem está falando com o Bitbucket. Cair no .netrc sem perceber e agir como a
+# conta de trabalho achando que é a pessoal é o erro mais caro possível aqui —
+# então a identidade é impressa antes de qualquer coisa.
+identificar() {
+  [ "$FORGE" = bitbucket ] || return 0
+  local quem
+  quem=$(bb "https://api.bitbucket.org/2.0/user" | jq -r '.username // .nickname // empty' 2>/dev/null || true)
+
+  if [ -z "$quem" ]; then
+    # Bearer sem sucesso e sem usuário definido é o sintoma exato de um API
+    # token mandado como Bearer — o erro aponta o conserto em vez de só falhar.
+    if [ "$BB_ORIGEM" != "~/.netrc" ] && [ -z "$BB_USER" ]; then
+      erro "o token não autenticou como Bearer. Se for um API token do Bitbucket, ele exige Basic: acrescente a linha 'user=<seu e-mail>' em ${CRED_FILE:-seu arquivo de credencial}"
+    fi
+    erro "não consegui autenticar no Bitbucket (origem: $BB_ORIGEM)"
+  fi
+  info "autenticado como '$quem' — credencial: $BB_ORIGEM${BB_MODO:+, $BB_MODO}"
+}
+identificar
+
+# ------------------------------------------------------------- PR já existe?
+
+info "verificando se já existe PR aberta para '$BRANCH'…"
+if [ "$FORGE" = bitbucket ]; then
+  EXISTENTE=$(bb --get "$API/pullrequests" \
+    --data-urlencode "q=source.branch.name=\"$BRANCH\" AND state=\"OPEN\"" \
+    --data-urlencode "fields=values.links.html.href,values.id" \
+    | jq -r '.values[0].links.html.href // empty' 2>/dev/null || true)
+else
+  EXISTENTE=$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || true)
+fi
+if [ -n "$EXISTENTE" ]; then
+  ok "já existe uma PR aberta para esta branch:"
+  printf '%s\n' "$EXISTENTE"
+  exit 0
+fi
+
+# ------------------------------------------------------------ contexto do diff
+
+STAT=$(git diff --stat "origin/$BASE...HEAD")
+LOG=$(git log --oneline --no-decorate "origin/$BASE..HEAD")
+PATCH=$(git diff "origin/$BASE...HEAD")
+
+TOTAL_LINHAS=$(printf '%s\n' "$PATCH" | wc -l)
+NOTA_TRUNCAGEM=""
+if [ "$TOTAL_LINHAS" -gt "$MAX_DIFF_LINES" ]; then
+  PATCH=$(printf '%s\n' "$PATCH" | head -n "$MAX_DIFF_LINES")
+  NOTA_TRUNCAGEM="
+
+ATENÇÃO: o patch abaixo foi truncado em $MAX_DIFF_LINES de $TOTAL_LINHAS linhas.
+Use o resumo (--stat) para saber o escopo completo e não afirme nada sobre
+arquivos cujo conteúdo não apareceu."
+  info "diff truncado: $MAX_DIFF_LINES de $TOTAL_LINHAS linhas"
+fi
+
+# --------------------------------------------------------------------- prompt
+
+montar_prompt() {
+  cat <<PROMPT
+Você é um engenheiro de plataforma escrevendo a descrição de um pull request.
+Escreva em português do Brasil, tom técnico e direto, sem marketing.
+
+Responda EXATAMENTE neste formato, sem cercas de código em volta:
+
+<uma linha de título>
+$MARCADOR
+<corpo em markdown>
+
+REGRAS DO TÍTULO
+- Formato "TICKET: resumo curto". Ticket detectado: ${TICKET:-nenhum}
+- Se nenhum ticket foi detectado, escreva só o resumo, sem inventar identificador.
+- Máximo 100 caracteres, sem ponto final.
+
+REGRAS DO CORPO — exatamente estas cinco seções, nesta ordem, com esta grafia:
+
+## O que foi feito?
+## Por que foi feito?
+## Plano de Implantação
+## Plano de Rollback
+## Plano de Testes
+
+Conteúdo esperado de cada uma:
+- "O que foi feito?": o que mudou, em bullets. Liste os arquivos alterados. Se o
+  diff revelar uma correção feita no meio do caminho, explique o erro e por que
+  ele passaria despercebido.
+- "Por que foi feito?": curto, amarrado ao ticket.
+- "Plano de Implantação": diga se a mudança é aditiva ou destrutiva, e descreva
+  os passos de acordo com o que ESTE diff mostra — deduza o mecanismo de deploy
+  a partir dos arquivos alterados, não presuma nenhuma ferramenta. Se o diff não
+  deixar claro como a mudança chega ao ambiente, diga isso em vez de inventar
+  um procedimento. Quando a mudança puder afetar algo já em execução, registre
+  que ela precisa de revisão humana antes de ser aplicada.
+- "Plano de Rollback": procedimento concreto e o nível de risco.
+- "Plano de Testes": o que dá para validar a partir deste diff. Não invente
+  resultado de teste que você não tem como saber; descreva a validação.
+
+PROIBIDO
+- Não acrescente nenhum rodapé de atribuição, assinatura, emoji de robô, nem
+  menção a IA, Claude ou Claude Code. A descrição termina na última linha do
+  "Plano de Testes".
+- Não invente ticket, número de PR, nome de ambiente ou resultado de execução.
+
+=== BRANCH ===
+origem: $BRANCH
+destino: $BASE
+commits: $COMMITS
+
+=== COMMITS ===
+$LOG
+
+=== ARQUIVOS ALTERADOS ===
+$STAT
+$NOTA_TRUNCAGEM
+
+=== PATCH ===
+$PATCH
+PROMPT
+}
+
+# --------------------------------------------------------------- validação
+
+# O modelo erra o contrato de vez em quando — entrega quatro seções, ou assina o
+# texto no fim. Validar aqui é mais barato que descobrir depois que a PR já foi
+# criada fora do padrão.
+validar() {
+  local corpo="$1" faltando=""
+  local secoes=(
+    "## O que foi feito?"
+    "## Por que foi feito?"
+    "## Plano de Implantação"
+    "## Plano de Rollback"
+    "## Plano de Testes"
+  )
+  for s in "${secoes[@]}"; do
+    grep -qF -- "$s" <<<"$corpo" || faltando="$faltando\n  - $s"
+  done
+  if [ -n "$faltando" ]; then
+    printf 'seções ausentes ou com grafia errada:%b\n' "$faltando" >&2
+    return 1
+  fi
+  if grep -qiE 'generated with|claude code|🤖|co-authored-by' <<<"$corpo"; then
+    printf 'a descrição veio com rodapé de atribuição, que não deve existir\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- geração
+
+# Define RESPOSTA. Como o ia_gerar, não devolve por stdout: o fallback dentro
+# dele precisa mudar o backend no shell de verdade, e $( ) mataria isso no
+# subshell — a tentativa seguinte repetiria o backend que acabou de falhar.
+gerar() {
+  ia_gerar "$(montar_prompt)" || return 1
+  RESPOSTA=$AI_SAIDA
+}
+
+TENTATIVA=0
+while :; do
+  TENTATIVA=$((TENTATIVA + 1))
+  info "gerando a descrição com o $(rotulo_backend), tentativa $TENTATIVA…"
+
+  gerar || erro "não consegui gerar a descrição"
+
+  if ! grep -qF -- "$MARCADOR" <<<"$RESPOSTA"; then
+    info "resposta sem o marcador de separação"
+  else
+    TITULO=$(sed "/$MARCADOR/,\$d" <<<"$RESPOSTA" | sed '/^[[:space:]]*$/d' | head -1)
+    CORPO=$(sed "1,/$MARCADOR/d" <<<"$RESPOSTA")
+    if validar "$CORPO"; then
+      break
+    fi
+  fi
+
+  [ "$TENTATIVA" -lt 3 ] || erro "três tentativas e a saída continua fora do template — abortando"
+  info "tentando de novo…"
+done
+
+# ---------------------------------------------------------- revisão humana
+
+mostrar() {
+  printf '\n\033[1m── título ──────────────────────────────────────\033[0m\n%s\n' "$TITULO"
+  printf '\n\033[1m── descrição ───────────────────────────────────\033[0m\n%s\n' "$CORPO"
+  printf '\n\033[1m────────────────────────────────────────────────\033[0m\n'
+  printf '%s → %s   (%s/%s em %s)\n\n' "$BRANCH" "$BASE" "$WORKSPACE" "$REPO" "$FORGE"
+}
+
+mostrar
+
+if [ "$DRY_RUN" = 1 ]; then
+  info "--dry-run: nada foi criado. JSON que seria enviado:"
+  jq -n --arg t "$TITULO" --arg d "$CORPO" --arg s "$BRANCH" --arg b "$BASE" \
+    '{title:$t, description:$d, source:{branch:{name:$s}}, destination:{branch:{name:$b}}}'
+  exit 0
+fi
+
+while :; do
+  read -r -p "[c]riar PR, [e]ditar, [r]egerar, [a]bortar? " escolha </dev/tty
+  case "$escolha" in
+    c|C) break ;;
+    a|A|"") erro "abortado" ;;
+    r|R)
+      info "regerando com o $(rotulo_backend)…"
+      gerar || erro "não consegui gerar a descrição"
+      TITULO=$(sed "/$MARCADOR/,\$d" <<<"$RESPOSTA" | sed '/^[[:space:]]*$/d' | head -1)
+      CORPO=$(sed "1,/$MARCADOR/d" <<<"$RESPOSTA")
+      validar "$CORPO" || info "atenção: a nova versão está fora do template"
+      mostrar
+      ;;
+    e|E)
+      TMP=$(mktemp /tmp/git-ai-pr.XXXXXX.md)
+      # A primeira linha é o título; o resto, o corpo. Mesmo formato na volta,
+      # para o parsing depois da edição ser o mesmo de antes.
+      { printf '%s\n' "$TITULO"; printf '%s\n' "$MARCADOR"; printf '%s\n' "$CORPO"; } >"$TMP"
+      "${EDITOR:-vi}" "$TMP" </dev/tty >/dev/tty 2>&1
+      TITULO=$(sed "/$MARCADOR/,\$d" "$TMP" | sed '/^[[:space:]]*$/d' | head -1)
+      CORPO=$(sed "1,/$MARCADOR/d" "$TMP")
+      rm -f "$TMP"
+      validar "$CORPO" || info "atenção: sua edição saiu do template (seguindo assim mesmo)"
+      mostrar
+      ;;
+    *) info "responda c, e, r ou a" ;;
+  esac
+done
+
+# ------------------------------------------------------------------ criação
+
+info "criando a PR…"
+
+if [ "$FORGE" = bitbucket ]; then
+  CORPO_JSON=$(jq -n --arg t "$TITULO" --arg d "$CORPO" --arg s "$BRANCH" --arg b "$BASE" \
+    '{title:$t, description:$d, source:{branch:{name:$s}}, destination:{branch:{name:$b}}}')
+
+  RESP=$(bb -X POST "$API/pullrequests" \
+    -H "Content-Type: application/json" \
+    -d "$CORPO_JSON" \
+    -w '\n%{http_code}')
+
+  CODIGO=$(tail -1 <<<"$RESP")
+  BODY=$(sed '$d' <<<"$RESP")
+
+  if [ "$CODIGO" != "201" ]; then
+    # A API do Bitbucket devolve o motivo em JSON; mostrar só o código esconde
+    # exatamente a informação que resolve o problema.
+    printf 'HTTP %s\n' "$CODIGO" >&2
+    jq -r '.error.message // .' <<<"$BODY" >&2 2>/dev/null || printf '%s\n' "$BODY" >&2
+    erro "não consegui criar a PR"
+  fi
+
+  PR_URL=$(jq -r '.links.html.href' <<<"$BODY")
+else
+  PR_URL=$(gh pr create --title "$TITULO" --body "$CORPO" --base "$BASE" --head "$BRANCH")
+fi
+
+ok "PR criada:"
+printf '%s\n' "$PR_URL"
+command -v xdg-open >/dev/null && xdg-open "$PR_URL" >/dev/null 2>&1 || true

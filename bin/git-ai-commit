@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+#
+# git-ai-commit — escreve a mensagem de commit com IA e comita.
+#
+# Chamado pelo lazygit (tecla G no painel de arquivos), mas funciona sozinho no
+# terminal. Opera sobre o que está STAGED — o mesmo contrato do `git commit`.
+#
+# O backend preferido é o Claude Code. Se ele não estiver instalado, não estiver
+# autenticado, ou a chamada falhar (rede, limite de uso, erro do provider), o
+# script cai automaticamente para o OpenCode e segue em frente — a ideia é nunca
+# travar o commit por causa do backend.
+#
+# A convenção da mensagem não é fixa: cada repo daqui usa a sua
+# ("[Fix] (onda-13) …", "CHG-2026-0141: …", "chore(escopo): …", "[PLATS-1488] …").
+# Em vez de impor um padrão, o script mostra ao modelo os commits recentes do
+# próprio repositório e manda seguir o que ele encontrar ali.
+#
+# Variáveis de ambiente:
+#   AI_COMMIT_BACKEND        auto | claude | opencode (default: auto)
+#                            'auto' tenta o Claude e cai para o OpenCode.
+#                            'claude' e 'opencode' fixam o backend, sem fallback.
+#   AI_COMMIT_MODEL          modelo do Claude (default: sonnet)
+#   AI_COMMIT_MODEL_OPENCODE modelo do OpenCode, no formato provider/modelo
+#                            (default: vazio — usa o default do próprio OpenCode)
+#   AI_COMMIT_MAX_LINES      teto de linhas do diff enviado (default: 1500)
+#   AI_COMMIT_EXEMPLOS       quantos commits recentes servem de exemplo (default: 15)
+#
+# Uso: git-ai-commit [--dry-run]
+
+set -euo pipefail
+
+DRY_RUN=0
+[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+
+MAX_LINES="${AI_COMMIT_MAX_LINES:-1500}"
+EXEMPLOS="${AI_COMMIT_EXEMPLOS:-15}"
+
+erro() { printf '\033[31merro:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m%s\033[0m\n' "$*" >&2; }
+ok()   { printf '\033[32m%s\033[0m\n' "$*" >&2; }
+
+command -v git >/dev/null || erro "git não está instalado"
+
+# A escolha do backend e o fallback vivem na lib, compartilhada com o git-ai-pr.
+# `readlink -f` porque o script normalmente é chamado por symlink em ~/.local/bin.
+AI_BACKEND="${AI_COMMIT_BACKEND:-auto}"
+AI_MODEL="${AI_COMMIT_MODEL:-sonnet}"
+AI_MODEL_OC="${AI_COMMIT_MODEL_OPENCODE:-}"
+AI_VAR_BACKEND=AI_COMMIT_BACKEND
+LIB="$(dirname "$(readlink -f "$0")")/lib/ai-backend.sh"
+[ -r "$LIB" ] || erro "não achei a lib de backend em $LIB"
+# shellcheck source=lib/ai-backend.sh
+. "$LIB"
+
+git rev-parse --git-dir >/dev/null 2>&1 || erro "não estamos num repositório git"
+
+# ------------------------------------------------------------ o que vai entrar
+
+# Trabalhamos sobre o índice, igual ao `git commit`. Sem isso o script poderia
+# descrever mudanças que não vão para o commit — mentira na mensagem.
+if git diff --cached --quiet; then
+  if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+    erro "não há nada para commitar"
+  fi
+  info "nada está staged, mas há mudanças no diretório de trabalho."
+  read -r -p "Dar 'git add -A' e commitar tudo? [s/N] " resp </dev/tty
+  case "$resp" in
+    s|S|y|Y) git add -A ;;
+    *) erro "escolha o que vai no commit (stage) e rode de novo" ;;
+  esac
+fi
+
+BRANCH=$(git branch --show-current || true)
+
+# Mesmo tratamento do git-ai-pr: o CHG é removido só para o padrão genérico não
+# casar "CHG-2026" e deixar o ticket real passar batido.
+CHG=$(printf '%s' "$BRANCH" | grep -oiE 'CHG-[0-9]{4}-[0-9]+' | head -1 || true)
+if [ -n "$CHG" ]; then
+  SEM_CHG=${BRANCH//"$CHG"/}
+else
+  SEM_CHG=$BRANCH
+fi
+TICKET=$(printf '%s' "$SEM_CHG" | grep -oiE '[A-Z][A-Z0-9]{1,9}-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]' || true)
+
+STAT=$(git diff --cached --stat)
+DIFF=$(git diff --cached)
+
+TOTAL=$(printf '%s\n' "$DIFF" | wc -l)
+NOTA=""
+if [ "$TOTAL" -gt "$MAX_LINES" ]; then
+  DIFF=$(printf '%s\n' "$DIFF" | head -n "$MAX_LINES")
+  NOTA="
+
+ATENÇÃO: o diff foi truncado em $MAX_LINES de $TOTAL linhas. Use o resumo acima
+para o escopo completo e não afirme nada sobre arquivos que não apareceram."
+  info "diff truncado: $MAX_LINES de $TOTAL linhas"
+fi
+
+# Os exemplos são o coração do prompt: é deles que sai a convenção.
+HISTORICO=$(git log --no-merges --format='%s' -n "$EXEMPLOS" 2>/dev/null || true)
+[ -n "$HISTORICO" ] || HISTORICO="(repositório sem histórico — use um assunto curto e direto)"
+
+# --------------------------------------------------------------------- prompt
+
+montar_prompt() {
+  cat <<PROMPT
+Escreva a mensagem de commit para as mudanças abaixo.
+
+Responda SOMENTE com a mensagem. Sem preâmbulo, sem explicação, sem cercas de
+código, sem aspas em volta.
+
+CONVENÇÃO
+Estes são os commits recentes DESTE repositório. Identifique o padrão
+predominante (prefixo de ticket, colchetes, escopo entre parênteses, idioma,
+maiúsculas) e siga o mesmo. Se houver mais de um padrão, use o mais frequente.
+
+$HISTORICO
+
+REGRAS
+- Primeira linha: assunto, no máximo 72 caracteres, sem ponto final, no modo
+  como o repositório escreve (imperativo ou substantivo — copie o histórico).
+- Ticket detectado na branch: ${TICKET:-nenhum}. Só use se o histórico mostrar
+  que este repositório põe ticket no assunto. Não invente identificador.
+- Corpo: só se acrescentar algo que o assunto não diz — o porquê da mudança, ou
+  uma consequência não óbvia. Separe com uma linha em branco. Se o assunto já
+  basta, não escreva corpo.
+- Descreva o que o diff mostra. Não invente motivação que não dê para deduzir.
+- Não acrescente rodapé, assinatura, "Co-Authored-By", emoji de robô nem
+  qualquer menção a IA, Claude ou Claude Code.
+
+=== ARQUIVOS ===
+$STAT
+$NOTA
+
+=== DIFF (staged) ===
+$DIFF
+PROMPT
+}
+
+# ------------------------------------------------------------------ validação
+
+validar() {
+  local msg="$1"
+  local assunto
+  assunto=$(head -1 <<<"$msg")
+
+  [ -n "$assunto" ] || { printf 'mensagem vazia\n' >&2; return 1; }
+
+  if [ "${#assunto}" -gt 100 ]; then
+    printf 'assunto com %s caracteres, longo demais\n' "${#assunto}" >&2
+    return 1
+  fi
+  # O modelo às vezes embrulha a resposta em ``` ou abre com "Aqui está…".
+  if grep -qE '^\s*```' <<<"$msg"; then
+    printf 'a mensagem veio dentro de cerca de código\n' >&2
+    return 1
+  fi
+  if grep -qiE '^(aqui está|segue|claro|aqui vai)' <<<"$assunto"; then
+    printf 'a mensagem veio com preâmbulo em vez do assunto\n' >&2
+    return 1
+  fi
+  if grep -qiE 'generated with|claude code|🤖|co-authored-by' <<<"$msg"; then
+    printf 'a mensagem veio com rodapé de atribuição, que não deve existir\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+# Define MSG. Como o ia_gerar, não devolve por stdout: o fallback dentro dele
+# precisa mudar o backend no shell de verdade, e $( ) mataria isso no subshell.
+gerar() {
+  ia_gerar "$(montar_prompt)" || return 1
+  # Tira linhas em branco das pontas sem mexer nas do meio, que separam corpo.
+  MSG=$(printf '%s\n' "$AI_SAIDA" | sed -e '/./,$!d' | tac | sed -e '/./,$!d' | tac)
+}
+
+escolher_backend
+
+TENTATIVA=0
+while :; do
+  TENTATIVA=$((TENTATIVA + 1))
+  info "escrevendo a mensagem com o $(rotulo_backend), tentativa $TENTATIVA…"
+
+  gerar || erro "não consegui gerar a mensagem"
+
+  validar "$MSG" && break
+
+  [ "$TENTATIVA" -lt 3 ] || erro "três tentativas e a mensagem continua inválida — abortando"
+  info "tentando de novo…"
+done
+
+# ------------------------------------------------------------ revisão humana
+
+mostrar() {
+  printf '\n\033[1m── mensagem ────────────────────────────────────\033[0m\n%s\n' "$MSG"
+  printf '\n\033[1m── arquivos ────────────────────────────────────\033[0m\n%s\n\n' "$STAT"
+}
+
+mostrar
+
+if [ "$DRY_RUN" = 1 ]; then
+  info "--dry-run: nada foi commitado."
+  exit 0
+fi
+
+while :; do
+  read -r -p "[c]omitar, [e]ditar, [r]egerar, [a]bortar? " escolha </dev/tty
+  case "$escolha" in
+    c|C) break ;;
+    a|A|"") erro "abortado (o que estava staged continua staged)" ;;
+    r|R)
+      info "regerando com o $(rotulo_backend)…"
+      gerar || erro "não consegui gerar a mensagem"
+      validar "$MSG" || info "atenção: a nova versão tem problema"
+      mostrar
+      ;;
+    e|E)
+      TMP=$(mktemp /tmp/git-ai-commit.XXXXXX)
+      printf '%s\n' "$MSG" >"$TMP"
+      "${EDITOR:-vi}" "$TMP" </dev/tty >/dev/tty 2>&1
+      MSG=$(cat "$TMP")
+      rm -f "$TMP"
+      [ -n "$MSG" ] || erro "mensagem ficou vazia — abortado"
+      mostrar
+      ;;
+    *) info "responda c, e, r ou a" ;;
+  esac
+done
+
+# ------------------------------------------------------------------- commit
+
+printf '%s\n' "$MSG" | git commit -F -
+ok "commit criado:"
+git log -1 --format='%h %s'

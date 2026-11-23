@@ -1,0 +1,479 @@
+#!/usr/bin/env bash
+#
+# test-git-ai — suíte de regressão do git-ai-commit e do git-ai-pr.
+#
+# Não usa rede nem gasta chamada de modelo: monta repositórios git sintéticos
+# num diretório temporário e põe um `claude` falso no PATH para forçar cada
+# saída. Rode depois de mexer em qualquer um dos dois scripts.
+#
+#   test-git-ai              casos offline (default)
+#   test-git-ai --com-modelo inclui os que chamam o Claude de verdade
+#
+# Sai com código 0 só se tudo passar.
+
+set -uo pipefail
+
+COM_MODELO=0
+[ "${1:-}" = "--com-modelo" ] && COM_MODELO=1
+
+RAIZ=$(mktemp -d /tmp/test-git-ai.XXXXXX)
+trap 'rm -rf "$RAIZ"' EXIT
+
+PASSOU=0
+FALHOU=0
+
+verde()  { printf '\033[32m%s\033[0m' "$*"; }
+vermelho() { printf '\033[31m%s\033[0m' "$*"; }
+
+# checa($descrição, $texto_onde_procurar, $padrão_esperado)
+checa() {
+  local desc="$1" texto="$2" padrao="$3"
+  if grep -qE "$padrao" <<<"$texto"; then
+    printf '  %s %s\n' "$(verde ok)" "$desc"
+    PASSOU=$((PASSOU + 1))
+  else
+    printf '  %s %s\n' "$(vermelho FALHOU)" "$desc"
+    printf '        esperava /%s/ na saída:\n' "$padrao"
+    sed 's/^/        | /' <<<"$texto" | head -6
+    FALHOU=$((FALHOU + 1))
+  fi
+}
+
+# Cria um repo com histórico e um remote falso. $1=dir $2=base $3=remote
+repo() {
+  local dir="$RAIZ/$1" base="$2" remote="$3"
+  mkdir -p "$dir" && cd "$dir"
+  git init -q -b "$base"
+  git config user.email t@e.com && git config user.name T
+  echo "inicial" > arquivo.txt
+  git add -A && git commit -qm "commit inicial"
+  git remote add origin "$remote"
+  git update-ref "refs/remotes/origin/$base" HEAD
+  git symbolic-ref "refs/remotes/origin/HEAD" "refs/remotes/origin/$base"
+  cd "$dir"
+}
+
+# Põe um `claude` falso no PATH que imprime $1
+stub_claude() {
+  stub_bin claude "$1"
+}
+
+# stub_bin($nome, $saida) — binário falso no PATH que imprime $saida e sai 0.
+stub_bin() {
+  mkdir -p "$RAIZ/bin"
+  { printf '#!/bin/bash\ncat <<'\''FIM'\''\n'; printf '%s\n' "$2"; printf 'FIM\n'; } > "$RAIZ/bin/$1"
+  chmod +x "$RAIZ/bin/$1"
+  export PATH="$RAIZ/bin:$PATH_ORIGINAL"
+}
+
+# stub_quebrado($nome) — binário falso que só falha, para exercitar o fallback.
+stub_quebrado() {
+  mkdir -p "$RAIZ/bin"
+  printf '#!/bin/bash\necho "erro simulado" >&2\nexit 1\n' > "$RAIZ/bin/$1"
+  chmod +x "$RAIZ/bin/$1"
+  export PATH="$RAIZ/bin:$PATH_ORIGINAL"
+}
+
+PATH_ORIGINAL=$PATH
+sem_stub() { export PATH=$PATH_ORIGINAL; rm -f "$RAIZ/bin/claude" "$RAIZ/bin/opencode"; }
+
+# Os stubs respondem a qualquer prompt, então o backend precisa ser fixo: em
+# 'auto' o resultado dependeria de haver credencial do Claude na máquina que
+# roda o teste, e a suíte mediria o ambiente em vez do script.
+export AI_COMMIT_BACKEND=claude
+export AI_PR_BACKEND=claude
+
+# O `claude` do PATH é stub e nunca usa esta chave, mas sem alguma credencial os
+# scripts recusariam o backend fixo numa máquina sem login.
+API_KEY_ORIGINAL="${ANTHROPIC_API_KEY-}"
+export ANTHROPIC_API_KEY=stub-para-os-testes
+
+# CLAUDE_CONFIG_DIR aponta para um diretório vazio: é assim que simulamos "o
+# claude está aí mas ninguém fez login" sem tirar o binário do PATH.
+SEM_CRED="$RAIZ/sem-credencial"
+mkdir -p "$SEM_CRED"
+sem_credencial() {
+  env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+      -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX \
+      CLAUDE_CONFIG_DIR="$SEM_CRED" "$@"
+}
+
+CORPO_BOM='## O que foi feito?
+mudou algo
+## Por que foi feito?
+porque sim
+## Plano de Implantação
+passos
+## Plano de Rollback
+reverter
+## Plano de Testes
+validar'
+
+# ============================================================ git-ai-pr: guardas
+
+printf '\n\033[1mgit-ai-pr — guardas\033[0m\n'
+
+repo pr-na-base main "git@bitbucket.org:ws/repo.git" >/dev/null 2>&1
+checa "recusa rodar na própria branch base" \
+  "$(git-ai-pr --dry-run 2>&1)" "própria branch base"
+
+repo pr-sem-commits main "git@bitbucket.org:ws/repo.git" >/dev/null 2>&1
+git checkout -q -b trabalho
+checa "recusa quando não há commits à frente" \
+  "$(git-ai-pr --dry-run 2>&1)" "não há commits à frente"
+
+repo pr-forge main "git@gitlab.com:ws/repo.git" >/dev/null 2>&1
+git checkout -q -b trabalho && echo x >> arquivo.txt && git commit -qam "muda"
+checa "recusa forge não suportado" \
+  "$(git-ai-pr --dry-run 2>&1)" "forge não suportado"
+
+# ==================================================== git-ai-pr: base main/master
+
+printf '\n\033[1mgit-ai-pr — detecção da branch base\033[0m\n'
+
+# A base detectada aparece textualmente na mensagem de "sem commits à frente",
+# e esse caminho não precisa de rede nem de credencial — dá para afirmar a base
+# exata sem sair da máquina.
+for base in main master; do
+  repo "pr-base-$base" "$base" "git@bitbucket.org:ws/repo.git" >/dev/null 2>&1
+  git checkout -q -b trabalho
+  checa "detecta base '$base'" \
+    "$(git-ai-pr --dry-run 2>&1)" "origin/$base — nada para abrir PR"
+done
+
+# ==================================================== git-ai-pr: validação
+
+printf '\n\033[1mgit-ai-pr — validação do template\033[0m\n'
+
+# Cada chamada precisa de um diretório novo: reaproveitar faria o `checkout -b`
+# falhar na segunda vez, e o teste passaria a medir outra coisa.
+N_PR=0
+prepara_pr_valido() {
+  N_PR=$((N_PR + 1))
+  repo "pr-valida-$N_PR" main "git@bitbucket.org:ws/repo.git" >/dev/null 2>&1
+  git checkout -q -b PLATS-1234-teste && echo x >> arquivo.txt && git commit -qam "muda"
+  git update-ref refs/remotes/origin/PLATS-1234-teste HEAD
+}
+
+prepara_pr_valido
+stub_claude "titulo
+@@@CORPO@@@
+## O que foi feito?
+a
+## Por que foi feito?
+b
+## Plano de Implantação
+c
+## Plano de Rollback
+d"
+checa "rejeita seção faltando e nomeia qual" \
+  "$(git-ai-pr --dry-run 2>&1)" "Plano de Testes"
+sem_stub
+
+prepara_pr_valido
+stub_claude "titulo
+@@@CORPO@@@
+$CORPO_BOM
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+checa "rejeita rodapé de atribuição" \
+  "$(git-ai-pr --dry-run 2>&1)" "rodapé de atribuição"
+sem_stub
+
+prepara_pr_valido
+stub_claude "titulo
+@@@CORPO@@@
+## O que foi feito?
+a"
+checa "aborta depois de 3 tentativas" \
+  "$(git-ai-pr --dry-run 2>&1)" "três tentativas"
+sem_stub
+
+# ==================================================== git-ai-pr: credencial
+
+printf '\n\033[1mgit-ai-pr — cascata de credencial\033[0m\n'
+
+prepara_pr_valido
+checa "arquivo inexistente falha em vez de cair no .netrc" \
+  "$(GIT_AI_CREDENTIALS=$RAIZ/nao-existe git-ai-pr --dry-run 2>&1)" \
+  "não dá para ler"
+
+printf 'token=invalido\n' > "$RAIZ/cred"; chmod 600 "$RAIZ/cred"
+checa "token sem 'user' explica que API token exige Basic" \
+  "$(GIT_AI_CREDENTIALS=$RAIZ/cred git-ai-pr --dry-run 2>&1)" \
+  "exige Basic"
+
+printf 'nada=aqui\n' > "$RAIZ/cred-vazia"; chmod 600 "$RAIZ/cred-vazia"
+checa "arquivo sem linha 'token=' é recusado" \
+  "$(GIT_AI_CREDENTIALS=$RAIZ/cred-vazia git-ai-pr --dry-run 2>&1)" \
+  "não achei a linha 'token='"
+
+# O caminho por repositório é o que o lazygit usa: lá dentro não há variável de
+# ambiente exportada, e é justamente onde escolher a conta errada custaria caro.
+prepara_pr_valido
+git config git-ai.credentials "$RAIZ/cred"
+# O rótulo da origem só sai no caminho de sucesso, que aqui não acontece (o
+# token é falso). A prova de que o git config foi usado é o script ter ido
+# parar NAQUELE arquivo em vez de cair no .netrc.
+checa "git config git-ai.credentials é respeitado sem variável" \
+  "$(env -u GIT_AI_CREDENTIALS git-ai-pr --dry-run 2>&1)" \
+  "$RAIZ/cred"
+
+checa "a variável tem precedência sobre o git config" \
+  "$(GIT_AI_CREDENTIALS=$RAIZ/cred-vazia git-ai-pr --dry-run 2>&1)" \
+  "não achei a linha 'token='"
+
+# ================================================ git-ai-pr: escolha de backend
+
+printf '\n\033[1mgit-ai-pr — backend e fallback para o opencode\033[0m\n'
+
+RESPOSTA_OPENCODE="PLATS-1234: veio do opencode
+@@@CORPO@@@
+$CORPO_BOM"
+
+prepara_pr_valido
+stub_claude "PLATS-1234: veio do claude
+@@@CORPO@@@
+$CORPO_BOM"
+stub_bin opencode "$RESPOSTA_OPENCODE"
+checa "sem credencial do claude, cai para o opencode" \
+  "$(sem_credencial env AI_PR_BACKEND=auto git-ai-pr --dry-run 2>&1)" \
+  "veio do opencode"
+sem_stub
+
+# O caso que motivou o fallback: autenticado, mas a chamada morre (rede, limite
+# de uso, erro do provider). Não pode virar erro fatal.
+prepara_pr_valido
+stub_quebrado claude
+stub_bin opencode "$RESPOSTA_OPENCODE"
+checa "chamada ao claude falhando cai para o opencode" \
+  "$(AI_PR_BACKEND=auto git-ai-pr --dry-run 2>&1)" \
+  "caindo para o opencode"
+sem_stub
+
+prepara_pr_valido
+stub_claude "PLATS-1234: veio do claude
+@@@CORPO@@@
+$CORPO_BOM"
+stub_bin opencode "$RESPOSTA_OPENCODE"
+checa "com claude autenticado o opencode não é usado" \
+  "$(AI_PR_BACKEND=auto git-ai-pr --dry-run 2>&1)" \
+  "veio do claude"
+sem_stub
+
+# O fallback não relaxa o contrato: cinco seções continuam obrigatórias, venham
+# de onde vierem.
+prepara_pr_valido
+stub_quebrado claude
+stub_bin opencode "PLATS-1234: veio do opencode
+@@@CORPO@@@
+## O que foi feito?
+a
+## Por que foi feito?
+b
+## Plano de Implantação
+c
+## Plano de Rollback
+d"
+checa "template segue validado na saída do opencode" \
+  "$(AI_PR_BACKEND=auto git-ai-pr --dry-run 2>&1)" \
+  "Plano de Testes"
+sem_stub
+
+prepara_pr_valido
+stub_claude "PLATS-1234: veio do claude
+@@@CORPO@@@
+$CORPO_BOM"
+checa "AI_PR_BACKEND inválido é recusado na hora" \
+  "$(AI_PR_BACKEND=gpt git-ai-pr --dry-run 2>&1)" \
+  "AI_PR_BACKEND inválido"
+sem_stub
+
+# ==================================================== extração de ticket
+
+printf '\n\033[1mextração de ticket do nome da branch\033[0m\n'
+
+ticket_de() {
+  local BRANCH="$1" CHG SEM_CHG
+  CHG=$(printf '%s' "$BRANCH" | grep -oiE 'CHG-[0-9]{4}-[0-9]+' | head -1 || true)
+  if [ -n "$CHG" ]; then SEM_CHG=${BRANCH//"$CHG"/}; else SEM_CHG=$BRANCH; fi
+  printf '%s' "$SEM_CHG" | grep -oiE '[A-Z][A-Z0-9]{1,9}-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]' || true
+}
+
+checa "CHG não rouba o ticket real" \
+  "$(ticket_de 'change/CHG-2026-0143-PLAT-8489-eks-upgrade')" '^PLAT-8489$'
+checa "ticket simples no começo" \
+  "$(ticket_de 'PLATS-1618-tenant-builder')" '^PLATS-1618$'
+checa "ticket depois de prefixo" \
+  "$(ticket_de 'feature/OPIN-5491-bump')" '^OPIN-5491$'
+checa "branch sem ticket devolve vazio" \
+  "[$(ticket_de 'migrate-banco-pine')]" '^\[\]$'
+checa "branch só com CHG devolve vazio" \
+  "[$(ticket_de 'CHG-2026-0999-apenas')]" '^\[\]$'
+
+# ==================================================== git-ai-commit
+
+printf '\n\033[1mgit-ai-commit — guardas e validação\033[0m\n'
+
+repo commit-limpo main "git@bitbucket.org:ws/repo.git" >/dev/null 2>&1
+checa "recusa quando não há nada para commitar" \
+  "$(git-ai-commit --dry-run 2>&1)" "nada para commitar"
+
+N_CM=0
+prepara_commit() {
+  N_CM=$((N_CM + 1))
+  repo "commit-teste-$N_CM" main "git@bitbucket.org:ws/repo.git" >/dev/null 2>&1
+  echo mudanca >> arquivo.txt && git add -A
+}
+
+prepara_commit
+stub_claude 'feat: algo
+
+Co-Authored-By: Claude <noreply@anthropic.com>'
+checa "rejeita rodapé de atribuição" \
+  "$(git-ai-commit --dry-run 2>&1)" "rodapé de atribuição"
+sem_stub
+
+prepara_commit
+stub_claude '```
+feat: algo
+```'
+checa "rejeita cerca de código" \
+  "$(git-ai-commit --dry-run 2>&1)" "cerca de código"
+sem_stub
+
+prepara_commit
+stub_claude 'Aqui está a mensagem de commit:
+
+feat: algo'
+checa "rejeita preâmbulo" \
+  "$(git-ai-commit --dry-run 2>&1)" "preâmbulo"
+sem_stub
+
+prepara_commit
+stub_claude "feat: $(printf 'x%.0s' {1..120})"
+checa "rejeita assunto longo demais" \
+  "$(git-ai-commit --dry-run 2>&1)" "longo demais"
+sem_stub
+
+prepara_commit
+stub_claude 'feat: mensagem boa e curta'
+checa "aceita mensagem válida" \
+  "$(git-ai-commit --dry-run 2>&1)" "mensagem boa e curta"
+sem_stub
+
+# =========================================== git-ai-commit: escolha de backend
+
+printf '\n\033[1mgit-ai-commit — backend e fallback para o opencode\033[0m\n'
+
+prepara_commit
+stub_claude 'feat: veio do claude'
+stub_bin opencode 'feat: veio do opencode'
+checa "sem credencial do claude, cai para o opencode" \
+  "$(sem_credencial env AI_COMMIT_BACKEND=auto git-ai-commit --dry-run 2>&1)" \
+  "veio do opencode"
+sem_stub
+
+prepara_commit
+stub_claude 'feat: veio do claude'
+stub_bin opencode 'feat: veio do opencode'
+checa "e diz por que trocou de backend" \
+  "$(sem_credencial env AI_COMMIT_BACKEND=auto git-ai-commit --dry-run 2>&1)" \
+  "sem credencial — usando o opencode"
+sem_stub
+
+# O caso que motivou o fallback: autenticado, mas a chamada morre (rede, limite
+# de uso, erro do provider). Não pode virar erro fatal.
+prepara_commit
+stub_quebrado claude
+stub_bin opencode 'feat: veio do opencode'
+checa "chamada ao claude falhando cai para o opencode" \
+  "$(AI_COMMIT_BACKEND=auto git-ai-commit --dry-run 2>&1)" \
+  "caindo para o opencode"
+sem_stub
+
+prepara_commit
+stub_quebrado claude
+stub_bin opencode 'feat: veio do opencode'
+checa "e a mensagem do opencode é a que vale" \
+  "$(AI_COMMIT_BACKEND=auto git-ai-commit --dry-run 2>&1)" \
+  "veio do opencode"
+sem_stub
+
+prepara_commit
+stub_claude 'feat: veio do claude'
+stub_bin opencode 'feat: veio do opencode'
+checa "com claude autenticado o opencode não é usado" \
+  "$(AI_COMMIT_BACKEND=auto git-ai-commit --dry-run 2>&1)" \
+  "veio do claude"
+sem_stub
+
+prepara_commit
+stub_claude 'feat: veio do claude'
+stub_bin opencode 'feat: veio do opencode'
+checa "AI_COMMIT_BACKEND=opencode ignora o claude" \
+  "$(AI_COMMIT_BACKEND=opencode git-ai-commit --dry-run 2>&1)" \
+  "veio do opencode"
+sem_stub
+
+# Backend fixo não faz fallback: cair calado para o outro esconderia justamente
+# o que quem fixou quer ver.
+prepara_commit
+stub_quebrado claude
+stub_bin opencode 'feat: veio do opencode'
+checa "AI_COMMIT_BACKEND=claude não cai para o opencode" \
+  "$(AI_COMMIT_BACKEND=claude git-ai-commit --dry-run 2>&1)" \
+  "a chamada ao claude falhou"
+sem_stub
+
+prepara_commit
+stub_claude 'feat: veio do claude'
+stub_bin opencode 'feat: veio do opencode'
+checa "AI_COMMIT_BACKEND=claude sem credencial reclama do login" \
+  "$(sem_credencial env AI_COMMIT_BACKEND=claude git-ai-commit --dry-run 2>&1)" \
+  "não achei credencial do claude"
+sem_stub
+
+prepara_commit
+stub_claude 'feat: veio do claude'
+checa "AI_COMMIT_BACKEND inválido é recusado na hora" \
+  "$(AI_COMMIT_BACKEND=chatgpt git-ai-commit --dry-run 2>&1)" \
+  "AI_COMMIT_BACKEND inválido"
+sem_stub
+
+# ==================================================== com modelo real
+
+if [ "$COM_MODELO" = 1 ]; then
+  unset AI_COMMIT_BACKEND AI_PR_BACKEND
+  if [ -n "$API_KEY_ORIGINAL" ]; then
+    export ANTHROPIC_API_KEY="$API_KEY_ORIGINAL"
+  else
+    unset ANTHROPIC_API_KEY
+  fi
+
+  printf '\n\033[1maprendizado de convenção (usa o Claude de verdade)\033[0m\n'
+
+  repo estilo-colchete main "git@bitbucket.org:ws/repo.git" >/dev/null 2>&1
+  for m in "[Onboarding] [APIM] (cliente1) Add templates" "[Offboarding] [APIM] (cliente2) Destroy resources" "[Fix] (onda-9) Remove duplicated rules"; do
+    echo "$m" >> arquivo.txt && git commit -qam "$m"
+  done
+  echo "novo" > outro.txt && git add -A
+  checa "segue convenção de colchetes do repo" \
+    "$(git-ai-commit --dry-run 2>&1)" '\[[A-Z]'
+
+  repo estilo-conventional main "git@bitbucket.org:ws/repo.git" >/dev/null 2>&1
+  for m in "chore(deps): bump lib 1.0 -> 2.0" "fix(api): corrige timeout" "feat(auth): adiciona escopo"; do
+    echo "$m" >> arquivo.txt && git commit -qam "$m"
+  done
+  echo "novo" > outro.txt && git add -A
+  checa "segue conventional commits do repo" \
+    "$(git-ai-commit --dry-run 2>&1)" '^\s*(feat|fix|chore|refactor|docs)(\(|:)'
+fi
+
+# ==================================================== resultado
+
+printf '\n\033[1m%s\033[0m  ' "─────────────────────────"
+printf '%s passou, %s falhou\n' "$(verde $PASSOU)" "$( [ "$FALHOU" -gt 0 ] && vermelho $FALHOU || printf '%s' 0 )"
+[ "$COM_MODELO" = 1 ] || printf 'casos com modelo real ficaram de fora — rode com --com-modelo para incluí-los\n'
+
+[ "$FALHOU" -eq 0 ]
